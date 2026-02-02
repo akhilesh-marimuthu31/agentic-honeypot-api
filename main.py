@@ -202,6 +202,17 @@ def honeypot_endpoint(
         "extracted_intelligence": intel
     }
 
+@app.get("/honeypot")
+def honeypot_healthcheck(
+    x_api_key: Optional[str] = Header(None)
+):
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+
+    return {
+        "status": "ok",
+        "message": "Honeypot endpoint reachable"
+    }
 
 # =============================
 # Run (Railway + local)
