@@ -130,12 +130,16 @@ def root():
 # =============================
 @app.post("/honeypot")
 def honeypot_endpoint(
-    event: HoneypotEvent,
+    event: Optional[HoneypotEvent] = None,
     x_api_key: Optional[str] = Header(None)
 ):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
-
+    if event is None:
+        event = HoneypotEvent(
+            conversation_id="tester_default",
+            message="Hello"
+        )
     cid = event.conversation_id
     msg = event.message
 
