@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Body
 from typing import Optional
 from pydantic import BaseModel
 import os
@@ -130,16 +130,22 @@ def root():
 # =============================
 @app.post("/honeypot")
 def honeypot_endpoint(
-    event: Optional[HoneypotEvent] = None,
+    payload: Optional[dict] = Body(None),
     x_api_key: Optional[str] = Header(None)
 ):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
-    if event is None:
-        event = HoneypotEvent(
-            conversation_id="tester_default",
-            message="Hello"
-        )
+    if not payload:
+        payload = {
+            "conversation_id": "tester_default",
+            "message": "Hello"
+        }
+
+# Convert payload to model manually
+    try:
+        event = HoneypotEvent(**payload)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid payload format")
     cid = event.conversation_id
     msg = event.message
 
