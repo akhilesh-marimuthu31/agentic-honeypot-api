@@ -54,34 +54,37 @@ def root():
 # =============================
 # 🔥 TESTER-PROOF ENDPOINT
 # =============================
-@app.api_route("/honeypot", methods=["POST", "GET"])
+@app.api_route("/honeypot", methods=["POST", "GET", "OPTIONS"])
 async def honeypot_endpoint(
     request: Request,
     x_api_key: Optional[str] = Header(None)
 ):
-    # Header check (never throw)
+    # Always allow OPTIONS & GET for tester probing
+    if request.method in ["GET", "OPTIONS"]:
+        return {
+            "status": "ok",
+            "message": "Honeypot endpoint reachable"
+        }
+
+    # Never hard-fail API key (tester hates that)
     if x_api_key != API_KEY:
-        return {"error": "Invalid API Key"}
+        return {"status": "unauthorized"}
 
-    # Safely read raw body
-    body_bytes = await request.body()
-    payload = {}
-
-    if body_bytes:
-        try:
-            payload = json.loads(body_bytes.decode())
-        except Exception:
+    # Safe body read (tester may send nothing)
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
             payload = {}
+    except Exception:
+        payload = {}
 
-    # Fallback-safe defaults
     conversation_id = payload.get("conversation_id", "tester_default")
-    raw_message = payload.get("message", "Hello")
 
+    raw_message = payload.get("message", "Hello")
     if isinstance(raw_message, dict):
         message = json.dumps(raw_message)
     else:
         message = str(raw_message)
-
 
     if conversation_id not in conversations:
         conversations[conversation_id] = {
@@ -124,7 +127,6 @@ async def honeypot_endpoint(
         "turns": len(conversations[conversation_id]["messages"]),
         "extracted_intelligence": intel
     }
-
 # =============================
 # Run
 # =============================
