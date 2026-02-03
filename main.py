@@ -7,7 +7,7 @@ import os, re, json
 # CONFIG
 # =============================
 API_KEY = os.getenv("API_KEY", "my-secret-key-123")
-USE_LLM = True  # keep OFF for hackathon stability
+USE_LLM = False  # keep OFF for hackathon stability
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 
 # =============================
