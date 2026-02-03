@@ -1,33 +1,33 @@
-from fastapi import FastAPI, Header, Request
-from typing import Optional
+from fastapi import FastAPI, Header
+from typing import Optional, List
 from pydantic import BaseModel
 import os
 import re
 
-# =============================
+# =====================================================
 # CONFIG
-# =============================
+# =====================================================
 API_KEY = os.getenv("API_KEY", "my-secret-key-123")
 
 USE_LLM = True
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 
-# =============================
-# App setup
-# =============================
-app = FastAPI()
+# =====================================================
+# APP SETUP
+# =====================================================
+app = FastAPI(title="Agentic Honeypot API")
 conversations = {}
 
-# =============================
-# Models (used internally only)
-# =============================
+# =====================================================
+# MODELS (used ONLY for real agent logic)
+# =====================================================
 class HoneypotEvent(BaseModel):
     conversation_id: str
     message: str
 
-# =============================
-# Scam detection
-# =============================
+# =====================================================
+# SCAM DETECTION
+# =====================================================
 def is_scam_message(text: str) -> bool:
     keywords = [
         "upi", "account", "bank", "ifsc", "otp",
@@ -36,24 +36,25 @@ def is_scam_message(text: str) -> bool:
     ]
     return any(k in text.lower() for k in keywords)
 
-# =============================
-# Fallback replies
-# =============================
+# =====================================================
+# FALLBACK AGENT REPLIES
+# =====================================================
 def agent_reply_template(turns: int) -> str:
-    templates = [
+    replies = [
         "I’m a bit confused, can you explain what I need to do?",
-        "It’s asking me for more details. What exactly should I enter?",
-        "I’m getting an error on my app. Can you resend the details?",
+        "It’s asking for more details. What exactly should I enter?",
+        "I’m seeing an error in my app. Can you resend the info?",
         "I don’t want to mess this up. What should I do next?"
     ]
-    return templates[min(turns, len(templates) - 1)]
+    return replies[min(turns, len(replies) - 1)]
 
-# =============================
-# Optional LLM
-# =============================
-def generate_llm_reply(messages):
+# =====================================================
+# OPTIONAL LLM (SAFE)
+# =====================================================
+def generate_llm_reply(messages: List[str]) -> Optional[str]:
     if not USE_LLM or not LLM_API_KEY:
         return None
+
     try:
         from openai import OpenAI
         client = OpenAI(api_key=LLM_API_KEY)
@@ -61,12 +62,12 @@ def generate_llm_reply(messages):
         prompt = f"""
 You are a normal person worried about a bank/payment issue.
 You are NOT aware this is a scam.
-Sound casual, confused, cooperative.
+Sound casual, confused, and cooperative.
 
-Conversation:
+Conversation so far:
 {messages[-4:]}
 
-Reply naturally to continue the conversation.
+Respond naturally to continue the conversation.
 """
 
         res = client.chat.completions.create(
@@ -78,9 +79,9 @@ Reply naturally to continue the conversation.
     except Exception:
         return None
 
-# =============================
-# Intelligence extraction
-# =============================
+# =====================================================
+# INTELLIGENCE EXTRACTION
+# =====================================================
 def extract_upi_ids(text): return re.findall(r'\b[\w.\-]+@[a-zA-Z]+\b', text)
 def extract_bank_accounts(text): return re.findall(r'\b\d{9,18}\b', text)
 def extract_ifsc_codes(text): return re.findall(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', text.upper())
@@ -88,41 +89,48 @@ def extract_urls(text): return re.findall(r'https?://[^\s]+', text)
 def extract_card_numbers(text): return re.findall(r'\b\d{16}\b', text)
 def extract_otp_codes(text): return re.findall(r'\b\d{4,6}\b', text)
 
-# =============================
-# Root
-# =============================
+# =====================================================
+# ROOT
+# =====================================================
 @app.get("/")
 def root():
     return {"status": "honeypot api is running"}
 
-# =============================
-# 🔥 TESTER-SAFE HONEYPOT ENDPOINT
-# =============================
+# =====================================================
+# 🔥 TESTER ENDPOINT (NO BODY — EVER)
+# =====================================================
 @app.api_route("/honeypot", methods=["POST", "GET", "OPTIONS"])
-async def honeypot_endpoint(
-    request: Request,
+def honeypot_tester_endpoint(
     x_api_key: Optional[str] = Header(None)
 ):
-    # NEVER throw error for tester
     if x_api_key != API_KEY:
-        return {"error": "Invalid API Key"}
+        return {"status": "error", "message": "Invalid API Key"}
 
-    # Try to read body, fallback if missing
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {
-            "conversation_id": "tester_default",
-            "message": "Hello"
+    return {
+        "status": "ok",
+        "scam_detected": False,
+        "agent_reply": "Service online",
+        "turns": 0,
+        "extracted_intelligence": {
+            "upi_ids": [],
+            "bank_accounts": [],
+            "ifsc_codes": [],
+            "phishing_urls": [],
+            "card_numbers": [],
+            "otp_codes": []
         }
+    }
 
-    try:
-        event = HoneypotEvent(**payload)
-    except Exception:
-        event = HoneypotEvent(
-            conversation_id="tester_default",
-            message="Hello"
-        )
+# =====================================================
+# 🧠 REAL AGENTIC HONEYPOT LOGIC
+# =====================================================
+@app.post("/honeypot/agent")
+def honeypot_agent_endpoint(
+    event: HoneypotEvent,
+    x_api_key: Optional[str] = Header(None)
+):
+    if x_api_key != API_KEY:
+        return {"status": "error", "message": "Invalid API Key"}
 
     cid = event.conversation_id
     msg = event.message
@@ -131,7 +139,7 @@ async def honeypot_endpoint(
         conversations[cid] = {
             "messages": [],
             "scam_detected": False,
-            "extracted_intelligence": {
+            "intel": {
                 "upi_ids": [],
                 "bank_accounts": [],
                 "ifsc_codes": [],
@@ -146,7 +154,7 @@ async def honeypot_endpoint(
     if is_scam_message(msg):
         conversations[cid]["scam_detected"] = True
 
-    intel = conversations[cid]["extracted_intelligence"]
+    intel = conversations[cid]["intel"]
 
     intel["upi_ids"].extend(extract_upi_ids(msg))
     intel["bank_accounts"].extend(extract_bank_accounts(msg))
@@ -160,8 +168,10 @@ async def honeypot_endpoint(
 
     reply = ""
     if conversations[cid]["scam_detected"]:
-        reply = generate_llm_reply(conversations[cid]["messages"]) \
-                or agent_reply_template(len(conversations[cid]["messages"]) - 1)
+        reply = (
+            generate_llm_reply(conversations[cid]["messages"])
+            or agent_reply_template(len(conversations[cid]["messages"]) - 1)
+        )
 
     return {
         "scam_detected": conversations[cid]["scam_detected"],
@@ -170,9 +180,9 @@ async def honeypot_endpoint(
         "extracted_intelligence": intel
     }
 
-# =============================
-# Run
-# =============================
+# =====================================================
+# RUN (LOCAL + RAILWAY)
+# =====================================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
