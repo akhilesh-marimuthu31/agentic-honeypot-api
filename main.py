@@ -75,7 +75,13 @@ async def honeypot_endpoint(
 
     # Fallback-safe defaults
     conversation_id = payload.get("conversation_id", "tester_default")
-    message = payload.get("message", "Hello")
+    raw_message = payload.get("message", "Hello")
+
+    if isinstance(raw_message, dict):
+        message = json.dumps(raw_message)
+    else:
+        message = str(raw_message)
+
 
     if conversation_id not in conversations:
         conversations[conversation_id] = {
