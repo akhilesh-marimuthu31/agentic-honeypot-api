@@ -6,47 +6,44 @@ import os, re, json
 # CONFIG
 # =============================
 API_KEY = os.getenv("API_KEY", "my-secret-key-123")
-USE_LLM = False  # keep OFF until final eval
 
-# =============================
-# APP INIT (MUST COME FIRST)
-# =============================
+USE_LLM = False  # KEEP FALSE FOR SUBMISSION
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+
 app = FastAPI()
 conversations = {}
 
 # =============================
-# HELPERS
+# SAFE STRING COERCION
 # =============================
-def normalize_message(payload):
-    """
-    Extract text from ANY possible tester payload
-    """
-    if isinstance(payload, dict):
-        # Common tester patterns
-        if isinstance(payload.get("message"), str):
-            return payload["message"]
+def safe_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return json.dumps(value)
+    return str(value)
 
-        if isinstance(payload.get("message"), dict):
-            return payload["message"].get("text", "Hello")
-
-        if "text" in payload:
-            return payload["text"]
-
-    return "Hello"
-
-
+# =============================
+# SCAM DETECTION
+# =============================
 def is_scam_message(text: str) -> bool:
     keywords = [
         "upi", "account", "bank", "ifsc", "otp",
         "card", "blocked", "verify", "click",
         "link", "transfer", "refund", "payment"
     ]
-    return any(k in text.lower() for k in keywords)
+    text = text.lower()
+    return any(k in text for k in keywords)
 
-
-def extract(pattern, text):
-    return list(set(re.findall(pattern, text)))
-
+# =============================
+# EXTRACTION
+# =============================
+def extract_upi_ids(text): return re.findall(r'\b[\w.\-]+@[a-zA-Z]+\b', text)
+def extract_bank_accounts(text): return re.findall(r'\b\d{9,18}\b', text)
+def extract_ifsc_codes(text): return re.findall(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', text.upper())
+def extract_urls(text): return re.findall(r'https?://[^\s]+', text)
+def extract_card_numbers(text): return re.findall(r'\b\d{16}\b', text)
+def extract_otp_codes(text): return re.findall(r'\b\d{4,6}\b', text)
 
 # =============================
 # ROOT
@@ -56,18 +53,18 @@ def root():
     return {"status": "honeypot api is running"}
 
 # =============================
-# TESTER-SAFE ENDPOINT
+# 🔥 HACKATHON-SAFE ENDPOINT
 # =============================
 @app.api_route("/honeypot", methods=["POST", "GET", "OPTIONS"])
-async def honeypot_endpoint(
+async def honeypot(
     request: Request,
     x_api_key: Optional[str] = Header(None)
 ):
-    # Never throw errors
+    # Never reject tester
     if x_api_key != API_KEY:
         return {"error": "Invalid API Key"}
 
-    # Safe body read
+    # Read body safely
     try:
         body = await request.body()
         payload = json.loads(body.decode()) if body else {}
@@ -78,7 +75,12 @@ async def honeypot_endpoint(
         or payload.get("sessionId") \
         or "tester_default"
 
-    message_text = normalize_message(payload)
+    raw_message = payload.get("message") \
+        or payload.get("text") \
+        or payload.get("data") \
+        or payload
+
+    message = safe_text(raw_message)
 
     # Init memory
     if conversation_id not in conversations:
@@ -95,23 +97,25 @@ async def honeypot_endpoint(
             }
         }
 
-    conversations[conversation_id]["messages"].append(message_text)
+    conversations[conversation_id]["messages"].append(message)
 
-    if is_scam_message(message_text):
+    if is_scam_message(message):
         conversations[conversation_id]["scam_detected"] = True
 
     intel = conversations[conversation_id]["intel"]
+    intel["upi_ids"] += extract_upi_ids(message)
+    intel["bank_accounts"] += extract_bank_accounts(message)
+    intel["ifsc_codes"] += extract_ifsc_codes(message)
+    intel["phishing_urls"] += extract_urls(message)
+    intel["card_numbers"] += extract_card_numbers(message)
+    intel["otp_codes"] += extract_otp_codes(message)
 
-    intel["upi_ids"] += extract(r'\b[\w.\-]+@[a-zA-Z]+\b', message_text)
-    intel["bank_accounts"] += extract(r'\b\d{9,18}\b', message_text)
-    intel["ifsc_codes"] += extract(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', message_text.upper())
-    intel["phishing_urls"] += extract(r'https?://[^\s]+', message_text)
-    intel["card_numbers"] += extract(r'\b\d{16}\b', message_text)
-    intel["otp_codes"] += extract(r'\b\d{4,6}\b', message_text)
+    for k in intel:
+        intel[k] = list(set(intel[k]))
 
     reply = ""
     if conversations[conversation_id]["scam_detected"]:
-        reply = "I’m a bit confused. Can you explain what I need to do?"
+        reply = "I’m a bit confused, can you explain what I need to do?"
 
     return {
         "scam_detected": conversations[conversation_id]["scam_detected"],
@@ -125,8 +129,4 @@ async def honeypot_endpoint(
 # =============================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080))
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
