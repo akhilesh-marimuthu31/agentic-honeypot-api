@@ -1,149 +1,132 @@
-from fastapi.responses import JSONResponse
-import traceback
+from fastapi import FastAPI, Header, Request
+from typing import Optional
+import os, re, json
 
+# =============================
+# CONFIG
+# =============================
+API_KEY = os.getenv("API_KEY", "my-secret-key-123")
+USE_LLM = False  # keep OFF until final eval
+
+# =============================
+# APP INIT (MUST COME FIRST)
+# =============================
+app = FastAPI()
+conversations = {}
+
+# =============================
+# HELPERS
+# =============================
+def normalize_message(payload):
+    """
+    Extract text from ANY possible tester payload
+    """
+    if isinstance(payload, dict):
+        # Common tester patterns
+        if isinstance(payload.get("message"), str):
+            return payload["message"]
+
+        if isinstance(payload.get("message"), dict):
+            return payload["message"].get("text", "Hello")
+
+        if "text" in payload:
+            return payload["text"]
+
+    return "Hello"
+
+
+def is_scam_message(text: str) -> bool:
+    keywords = [
+        "upi", "account", "bank", "ifsc", "otp",
+        "card", "blocked", "verify", "click",
+        "link", "transfer", "refund", "payment"
+    ]
+    return any(k in text.lower() for k in keywords)
+
+
+def extract(pattern, text):
+    return list(set(re.findall(pattern, text)))
+
+
+# =============================
+# ROOT
+# =============================
+@app.get("/")
+def root():
+    return {"status": "honeypot api is running"}
+
+# =============================
+# TESTER-SAFE ENDPOINT
+# =============================
 @app.api_route("/honeypot", methods=["POST", "GET", "OPTIONS"])
-async def honeypot_endpoint(request: Request, x_api_key: Optional[str] = Header(None)):
-    # QUICK PROBE HANDLING
-    if request.method in ("GET", "OPTIONS"):
-        return JSONResponse({"status": "ok", "message": "Honeypot endpoint reachable"})
+async def honeypot_endpoint(
+    request: Request,
+    x_api_key: Optional[str] = Header(None)
+):
+    # Never throw errors
+    if x_api_key != API_KEY:
+        return {"error": "Invalid API Key"}
 
-    # Top-level guard so tester never sees non-JSON/500
+    # Safe body read
     try:
-        # Always accept header but do not hard-fail tester
-        if x_api_key != API_KEY:
-            return JSONResponse({"status": "unauthorized", "message": "Invalid API key"})
-
-        # --- LOG incoming metadata for debugging ---
-        headers = dict(request.headers)
-        content_length = headers.get("content-length")
-        print("=== HONEYPOT REQUEST ===")
-        print("method:", request.method)
-        print("content-length:", content_length)
-        print("headers keys:", list(headers.keys()))
-        body_bytes = await request.body()
-        print("raw body bytes len:", len(body_bytes))
-        raw_text = body_bytes.decode("utf-8", errors="replace") if body_bytes else ""
-        print("raw body preview:", raw_text[:1000])
-        # --- end logging ---
-
-        # Parse if JSON, otherwise keep empty dict
+        body = await request.body()
+        payload = json.loads(body.decode()) if body else {}
+    except Exception:
         payload = {}
-        if body_bytes:
-            try:
-                parsed = json.loads(raw_text)
-                if isinstance(parsed, dict):
-                    payload = parsed
-                else:
-                    # If it's a wrapper or list, try to find first dict
-                    if isinstance(parsed, list) and parsed:
-                        if isinstance(parsed[0], dict):
-                            payload = parsed[0]
-            except Exception:
-                # ignore malformed JSON, keep payload={}
-                payload = {}
 
-        # tolerant extractor: try common wrapper keys for message
-        def find_text(obj):
-            if isinstance(obj, str):
-                return obj
-            if isinstance(obj, dict):
-                # prefer "message" / "text" / "body"
-                for k in ("message", "text", "body", "msg", "payload"):
-                    if k in obj:
-                        val = obj[k]
-                        if isinstance(val, str):
-                            return val
-                        if isinstance(val, dict):
-                            # nested text: return json string
-                            return json.dumps(val)
-                # otherwise search values recursively (first string found)
-                for v in obj.values():
-                    res = find_text(v)
-                    if res:
-                        return res
-            if isinstance(obj, list):
-                for item in obj:
-                    res = find_text(item)
-                    if res:
-                        return res
-            return None
+    conversation_id = payload.get("conversation_id") \
+        or payload.get("sessionId") \
+        or "tester_default"
 
-        conversation_id = payload.get("conversation_id", "tester_default")
-        raw_message_candidate = payload.get("message", None)
-        message = None
-        if raw_message_candidate is None:
-            # try find_text across the whole payload
-            message = find_text(payload) or "Hello"
-        else:
-            # normalize message to string
-            if isinstance(raw_message_candidate, dict):
-                message = json.dumps(raw_message_candidate)
-            else:
-                message = str(raw_message_candidate)
+    message_text = normalize_message(payload)
 
-        # Ensure conversation exists
-        if conversation_id not in conversations:
-            conversations[conversation_id] = {
-                "messages": [],
-                "scam_detected": False,
-                "extracted_intelligence": {
-                    "upi_ids": [], "bank_accounts": [], "ifsc_codes": [],
-                    "phishing_urls": [], "card_numbers": [], "otp_codes": []
-                }
-            }
-
-        conv = conversations[conversation_id]
-        conv["messages"].append(message)
-
-        # Scam detection (safe: lower only on string)
-        if isinstance(message, str) and is_scam_message(message):
-            conv["scam_detected"] = True
-
-        intel = conv["extracted_intelligence"]
-        intel["upi_ids"] += extract_upi_ids(message)
-        intel["bank_accounts"] += extract_bank_accounts(message)
-        intel["ifsc_codes"] += extract_ifsc_codes(message)
-        intel["phishing_urls"] += extract_urls(message)
-        intel["card_numbers"] += extract_card_numbers(message)
-        intel["otp_codes"] += extract_otp_codes(message)
-
-        # dedupe + ensure lists
-        for k in intel:
-            intel[k] = list(dict.fromkeys([str(x) for x in intel[k] if x]))
-
-        # Agent reply (simple fallback here)
-        agent_reply = ""
-        if conv["scam_detected"]:
-            agent_reply = "I’m a bit confused. Can you explain what I need to do?"
-
-        # Build final response exactly with expected shape & types
-        resp = {
-            "scam_detected": bool(conv["scam_detected"]),
-            "agent_reply": str(agent_reply),
-            "turns": int(len(conv["messages"])),
-            "extracted_intelligence": {
-                "upi_ids": intel.get("upi_ids", []),
-                "bank_accounts": intel.get("bank_accounts", []),
-                "ifsc_codes": intel.get("ifsc_codes", []),
-                "phishing_urls": intel.get("phishing_urls", []),
-                "card_numbers": intel.get("card_numbers", []),
-                "otp_codes": intel.get("otp_codes", [])
+    # Init memory
+    if conversation_id not in conversations:
+        conversations[conversation_id] = {
+            "messages": [],
+            "scam_detected": False,
+            "intel": {
+                "upi_ids": [],
+                "bank_accounts": [],
+                "ifsc_codes": [],
+                "phishing_urls": [],
+                "card_numbers": [],
+                "otp_codes": []
             }
         }
 
-        print("== RESPONSE PREVIEW keys:", list(resp.keys()))
-        return JSONResponse(resp)
+    conversations[conversation_id]["messages"].append(message_text)
 
-    except Exception:
-        print("UNHANDLED EXCEPTION IN /honeypot")
-        traceback.print_exc()
-        # Always return JSON and 200 so tester doesn't treat as invalid
-        return JSONResponse({
-            "scam_detected": False,
-            "agent_reply": "",
-            "turns": 0,
-            "extracted_intelligence": {
-                "upi_ids": [], "bank_accounts": [], "ifsc_codes": [],
-                "phishing_urls": [], "card_numbers": [], "otp_codes": []
-            }
-        })
+    if is_scam_message(message_text):
+        conversations[conversation_id]["scam_detected"] = True
+
+    intel = conversations[conversation_id]["intel"]
+
+    intel["upi_ids"] += extract(r'\b[\w.\-]+@[a-zA-Z]+\b', message_text)
+    intel["bank_accounts"] += extract(r'\b\d{9,18}\b', message_text)
+    intel["ifsc_codes"] += extract(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', message_text.upper())
+    intel["phishing_urls"] += extract(r'https?://[^\s]+', message_text)
+    intel["card_numbers"] += extract(r'\b\d{16}\b', message_text)
+    intel["otp_codes"] += extract(r'\b\d{4,6}\b', message_text)
+
+    reply = ""
+    if conversations[conversation_id]["scam_detected"]:
+        reply = "I’m a bit confused. Can you explain what I need to do?"
+
+    return {
+        "scam_detected": conversations[conversation_id]["scam_detected"],
+        "agent_reply": reply,
+        "turns": len(conversations[conversation_id]["messages"]),
+        "extracted_intelligence": intel
+    }
+
+# =============================
+# RUN
+# =============================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080))
+    )
