@@ -50,7 +50,14 @@ async def honeypot(request: Request, x_api_key: Optional[str] = Header(None)):
         payload = {}
 
     conversation_id = payload.get("conversation_id") or payload.get("sessionId") or "tester"
-    message = safe_text(payload.get("message", ""))
+    raw_message = payload.get("message", "Hello")
+
+    # Normalize message safely
+    if isinstance(raw_message, dict):
+        message = raw_message.get("text", "")
+    else:
+        message = str(raw_message)
+
 
     if conversation_id not in conversations:
         conversations[conversation_id] = {
