@@ -1,11 +1,11 @@
 from fastapi import FastAPI, Header, Request
 from typing import Optional
 import os, re, json
-
+app = FastAPI()
 API_KEY = os.getenv("API_KEY", "my-secret-key-123")
 USE_LLM = False  # KEEP FALSE for submission stability
 
-app = FastAPI()
+
 conversations = {}
 
 # ---------------------------
